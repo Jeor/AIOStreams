@@ -106,6 +106,7 @@ const defaultDependencies: JellyfinApiDependencies = {
   },
 
   async searchItems(userData, query, types) {
+    if (types.length === 0) return [];
     const aiostreams = await new AIOStreams(userData).initialise();
     const catalogs = aiostreams.getCatalogs();
     const searchable = types.flatMap((type) =>
@@ -381,6 +382,11 @@ export function createJellyfinRouter(
   router.get('/UserItems/Resume', emptyItemQueryHandler);
   router.get('/Shows/NextUp', emptyItemQueryHandler);
   router.get('/Shows/Upcoming', emptyItemQueryHandler);
+  // Jellyfin clients search people in parallel with media. AIOStreams does not
+  // expose a people library, but this route must still return a successful
+  // query result or clients such as Infuse cancel the accompanying media
+  // request and Swiftfin discards the complete grouped search.
+  router.get('/Persons', emptyItemQueryHandler);
 
   // AIOStreams discovery extension: translate an external provider identity to
   // the stable 32-hex item ID subsequently used by official Jellyfin routes.
@@ -933,7 +939,11 @@ function searchTypes(req: Request): Array<'movie' | 'series'> {
   const types: Array<'movie' | 'series'> = [];
   if (include.includes('movie')) types.push('movie');
   if (include.includes('series')) types.push('series');
-  return types.length > 0 ? types : ['movie', 'series'];
+  // An explicit unsupported Jellyfin item type (Person, Episode, BoxSet,
+  // LiveTvProgram, etc.) is not an untyped media search. Returning no types
+  // avoids duplicate AIOStreams initialisation and prevents movie results from
+  // leaking into every Swiftfin search section.
+  return types;
 }
 
 function itemQuery(items: unknown[], startIndex: number = 0) {

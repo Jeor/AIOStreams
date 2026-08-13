@@ -355,6 +355,28 @@ describe('Jellyfin player API', () => {
     expect(searchResult.Items[0]!.ImageTags.Primary).toBeTruthy();
     expect(searchResult.Items[0]!.UserData).toBeTruthy();
 
+    const unsupportedSearch = await fetch(
+      `${base}/Items?SearchTerm=The%20Matrix&IncludeItemTypes=Episode`,
+      { headers: infuseHeaders }
+    );
+    expect(unsupportedSearch.status).toBe(200);
+    expect(await unsupportedSearch.json()).toMatchObject({
+      Items: [],
+      TotalRecordCount: 0,
+    });
+
+    const peopleSearch = await fetch(
+      `${base}/Persons?SearchTerm=The%20Matrix`,
+      {
+        headers: infuseHeaders,
+      }
+    );
+    expect(peopleSearch.status).toBe(200);
+    expect(await peopleSearch.json()).toMatchObject({
+      Items: [],
+      TotalRecordCount: 0,
+    });
+
     const searchedItem = searchResult.Items[0]!;
     const details = await fetch(`${base}/Items/${searchedItem.Id}`, {
       headers: infuseHeaders,
