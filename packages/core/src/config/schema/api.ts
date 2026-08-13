@@ -111,6 +111,16 @@ export const apiSchema = {
     requiresRestart: true,
     secret: false,
   },
+  enableJellyfinApi: {
+    schema: z.boolean(),
+    default: false,
+    label: 'Enable Jellyfin player API',
+    description:
+      'Expose /jellyfin as an in-process Jellyfin-compatible player API. It uses existing AIOStreams users, returns only direct provider streams, and never proxies media bytes.',
+    env: 'ENABLE_JELLYFIN_API',
+    requiresRestart: false,
+    secret: false,
+  },
   enableNabApi: {
     schema: z.boolean(),
     default: true,

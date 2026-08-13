@@ -35,6 +35,7 @@ import {
 import seanimeExtensionsRouter from './routes/seanime/extensions.js';
 import sabnzbdRouter from './routes/api/sabnzbd.js';
 import publicBlocklistRouter from './routes/blocklist.js';
+import jellyfinRouter from './routes/jellyfin/index.js';
 import { createNabRouter } from './routes/api/nab.js';
 import {
   gdrive,
@@ -192,6 +193,11 @@ apiRouter.use((req, res) => {
 });
 
 app.use(`/api/v${constants.API_VERSION}`, apiRouter);
+
+// Optional in-process Jellyfin-compatible player surface. The router performs
+// its own runtime feature check so dashboard setting changes do not require a
+// second service or a remount.
+app.use('/jellyfin', jellyfinRouter);
 
 // Stremio Routes
 const stremioRouter = express.Router({ mergeParams: true });

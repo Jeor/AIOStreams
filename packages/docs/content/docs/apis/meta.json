@@ -1,9 +1,4 @@
 {
   "title": "API",
-  "pages": [
-    "index",
-    "search",
-    "user",
-    "anime"
-  ]
+  "pages": ["index", "jellyfin", "search", "user", "anime"]
 }

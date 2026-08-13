@@ -1,0 +1,114 @@
+---
+title: Jellyfin player API
+description: Use AIOStreams as a playback-only Jellyfin-compatible server for direct provider streams.
+---
+
+The optional Jellyfin player API lets a media player authenticate against an
+existing AIOStreams configuration and request AIOStreams' ordered stream
+results using Jellyfin `PlaybackInfo` calls. It runs inside the normal
+AIOStreams server; no bridge, sidecar, or media proxy is required.
+
+Enable **Settings → API → Enable Jellyfin player API**, or set:
+
+```env
+ENABLE_JELLYFIN_API=true
+```
+
+Configure the player with this server URL:
+
+```text
+https://your-aiostreams.example/jellyfin
+```
+
+Use an AIOStreams configuration UUID (or configured alias) as the username and
+that configuration's plain password as the password.
+
+## Scope
+
+This is a playback-only compatibility surface, not a replacement Jellyfin
+library server. It implements:
+
+```text
+GET  /System/Info/Public
+POST /Users/AuthenticateByName
+GET  /Users/Me
+GET  /Items
+GET  /Items/Resolve
+GET  /Items/{itemId}
+POST /Items/{itemId}/PlaybackInfo
+GET  /Videos/{itemId}/stream[.{container}]
+```
+
+`PlaybackInfo` uses the normal AIOStreams fetch, filtering, deduplication,
+sorting, Stream Expression Language, and result-limit pipeline. The dedicated
+control-plane path returns before failover-chain construction, proxification,
+external-download injection, next-episode precache, stream preload, URL ping,
+or media transport.
+
+Only final external HTTP(S) URLs are exposed. A source is omitted when it:
+
+- points back to the AIOStreams origin;
+- is already marked as proxied;
+- requires request or response headers;
+- is a magnet, NZB, archive, local file, or another non-HTTP transport.
+
+The virtual `/Videos` URL validates a short-lived signed source grant and
+responds with an HTTP `302` to the provider. AIOStreams does not request,
+inspect, buffer, transcode, or relay the media bytes.
+
+## Translating an external ID
+
+The resolver extension converts an external identity into the stable 32-hex
+item ID used by the official Jellyfin-shaped playback route:
+
+```http
+GET /jellyfin/Items/Resolve?Kind=Movie&Provider=Imdb&Id=tt1234567
+X-Emby-Token: <access-token>
+```
+
+Episode example:
+
+```http
+GET /jellyfin/Items/Resolve?Kind=Episode&Provider=Tmdb&Id=98765&Season=2&Episode=3
+X-Emby-Token: <access-token>
+```
+
+The same translation is available through an item query:
+
+```http
+GET /jellyfin/Items?AnyProviderIdEquals=Imdb.tt1234567&IncludeItemTypes=Movie
+```
+
+After reading the returned `Id`, request playback information normally:
+
+```http
+POST /jellyfin/Items/41494f4a010171000012d687ffffffff/PlaybackInfo
+X-Emby-Token: <access-token>
+Content-Type: application/json
+
+{}
+```
+
+For player integrations that already own discovery, the compatibility parser
+also accepts aliases such as `movie:imdb:tt1234567` and
+`episode:imdb:tt7654321:2:3`. Stable 32-hex IDs are recommended for clients
+that enforce Jellyfin's UUID-shaped item convention.
+
+## Authentication
+
+Authenticate with Jellyfin's standard request shape:
+
+```http
+POST /jellyfin/Users/AuthenticateByName
+Content-Type: application/json
+
+{
+  "Username": "your-configuration-uuid",
+  "Pw": "your-configuration-password"
+}
+```
+
+The returned `AccessToken` is accepted through `X-Emby-Token`,
+`X-MediaBrowser-Token`, `api_key`, or the Jellyfin `Authorization` token field.
+It expires according to the configured API session lifetime. Passwords and
+provider URLs are encrypted inside HMAC-signed tokens and are never logged.

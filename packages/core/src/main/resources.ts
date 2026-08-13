@@ -248,7 +248,8 @@ export async function processStreams(
     includeExternalFailover?: boolean;
     sameReleaseLimit: number;
     duplicateStaggerMs: number;
-  }
+  },
+  applyDeliveryEffects: boolean = true
 ): Promise<{
   streams: ParsedStream[];
   errors: AIOStreamsError[];
@@ -434,39 +435,41 @@ export async function processStreams(
 
   ctx.filterer.generateFilterSummary(streams, finalStreams, type, id);
 
-  const { streams: proxiedStreams, error } =
-    await ctx.proxifier.proxify(finalStreams);
+  if (applyDeliveryEffects) {
+    const { streams: proxiedStreams, error } =
+      await ctx.proxifier.proxify(finalStreams);
 
-  if (error) {
-    errors.push({ title: `Proxifier Error`, description: error });
-  }
-  finalStreams = proxiedStreams.map((stream) => {
-    if (stream.parsedFile) {
-      stream.parsedFile.visualTags = stream.parsedFile.visualTags.filter(
-        (tag) => !constants.FAKE_VISUAL_TAGS.includes(tag as any)
-      );
-      stream.parsedFile.languages = stream.parsedFile.languages.filter(
-        (lang) => !['Original'].includes(lang as any)
-      );
+    if (error) {
+      errors.push({ title: `Proxifier Error`, description: error });
     }
-    return stream;
-  });
-
-  if (ctx.userData.externalDownloads) {
-    const streamsWithExternalDownloads: ParsedStream[] = [];
-    for (const stream of finalStreams) {
-      streamsWithExternalDownloads.push(stream);
-      if (stream.url) {
-        streamsWithExternalDownloads.push(
-          StreamUtils.createDownloadableStream(stream)
+    finalStreams = proxiedStreams.map((stream) => {
+      if (stream.parsedFile) {
+        stream.parsedFile.visualTags = stream.parsedFile.visualTags.filter(
+          (tag) => !constants.FAKE_VISUAL_TAGS.includes(tag as any)
+        );
+        stream.parsedFile.languages = stream.parsedFile.languages.filter(
+          (lang) => !['Original'].includes(lang as any)
         );
       }
+      return stream;
+    });
+
+    if (ctx.userData.externalDownloads) {
+      const streamsWithExternalDownloads: ParsedStream[] = [];
+      for (const stream of finalStreams) {
+        streamsWithExternalDownloads.push(stream);
+        if (stream.url) {
+          streamsWithExternalDownloads.push(
+            StreamUtils.createDownloadableStream(stream)
+          );
+        }
+      }
+      logger.debug(
+        { added: streamsWithExternalDownloads.length - finalStreams.length },
+        'added external download streams'
+      );
+      finalStreams = streamsWithExternalDownloads;
     }
-    logger.debug(
-      { added: streamsWithExternalDownloads.length - finalStreams.length },
-      'added external download streams'
-    );
-    finalStreams = streamsWithExternalDownloads;
   }
 
   return {
@@ -669,7 +672,8 @@ export async function getStreams(
   ctx: AIOStreamsContext,
   id: string,
   type: string,
-  preCaching: boolean = false
+  preCaching: boolean = false,
+  controlPlaneOnly: boolean = false
 ): Promise<StreamsResponse> {
   logger.debug({ type, id }, 'handling stream request');
   const statistics: { title: string; description: string; forced?: boolean }[] =
@@ -696,7 +700,7 @@ export async function getStreams(
   if (usePipelineCache) {
     pipelineCacheKey = `${getSimpleTextHash(
       JSON.stringify(ctx.userData)
-    )}:${type}:${id}`;
+    )}:${type}:${id}:${controlPlaneOnly ? 'control-plane' : 'playback'}`;
     const cached = await pipelineResultCache.get(pipelineCacheKey);
     if (cached !== undefined) {
       // The fetch pipeline that normally populates the context's backing fields
@@ -743,7 +747,8 @@ export async function getStreams(
     streams,
     context,
     false,
-    ctx.userData.failover?.enabled &&
+    !controlPlaneOnly &&
+      ctx.userData.failover?.enabled &&
       (!preCaching || ctx.userData.failover?.precacheFailover)
       ? {
           maxAttempts: Math.min(
@@ -781,7 +786,8 @@ export async function getStreams(
             ctx.userData.failover.duplicateStaggerMs ??
             constants.DEFAULT_FAILOVER_DUPLICATE_STAGGER_MS,
         }
-      : undefined
+      : undefined,
+    !controlPlaneOnly
   );
   let finalStreams = processResults.streams;
   const pipelineTimings = processResults.timings;
@@ -814,6 +820,26 @@ export async function getStreams(
         forced: true,
       });
     }
+  }
+
+  // Jellyfin-compatible callers need AIOStreams' authoritative ordered list,
+  // but none of the playback decoration that follows it. Return immediately
+  // after SEL and result limiting: no proxying, failover chain, download
+  // entries, next-episode precache, preload, URL ping, or media transport.
+  if (controlPlaneOnly) {
+    const response: StreamsResponse = {
+      success: true,
+      data: { streams: finalStreams, statistics: [] },
+      errors,
+    };
+    if (usePipelineCache) {
+      await pipelineResultCache.set(pipelineCacheKey, response, pipelineTtl);
+    }
+    logger.debug(
+      { streams: finalStreams.length, errors: errors.length },
+      'control-plane stream request complete'
+    );
+    return response;
   }
 
   if (ctx.userData.precacheNextEpisode && !preCaching) {

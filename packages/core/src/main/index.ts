@@ -5,12 +5,7 @@ import {
   StrictManifestResource,
   UserData,
 } from '../db/index.js';
-import {
-  Cache,
-  createLogger,
-  IdParser,
-  userScopeKey,
-} from '../utils/index.js';
+import { Cache, createLogger, IdParser, userScopeKey } from '../utils/index.js';
 import { withVariantSelector } from '../variants/runtime.js';
 import Proxifier from '../streams/proxifier.js';
 import StreamLimiter from '../streams/limiter.js';
@@ -97,6 +92,16 @@ export class AIOStreams {
     preCaching: boolean = false
   ) {
     return _getStreams(this.ctx, id, type, preCaching);
+  }
+
+  /**
+   * Returns the final fetch/filter/deduplicate/sort/SEL/limit result without
+   * invoking AIOStreams playback delivery effects. Intended for in-process
+   * compatibility APIs that hand direct provider URLs to another player.
+   */
+  public async getControlPlaneStreams(id: string, type: string) {
+    this.checkInitialised();
+    return _getStreams(this.ctx, id, type, false, true);
   }
 
   public async getCatalog(type: string, id: string, extras?: string) {
