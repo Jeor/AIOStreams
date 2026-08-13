@@ -177,6 +177,12 @@ describe('Jellyfin player API', () => {
     expect(systemInfo.status).toBe(200);
     expect(await systemInfo.json()).toMatchObject({ Version: '10.10.7' });
 
+    const groupingOptions = await fetch(`${base}/UserViews/GroupingOptions`, {
+      headers: infuseHeaders,
+    });
+    expect(groupingOptions.status).toBe(200);
+    expect(await groupingOptions.json()).toEqual([]);
+
     const views = await fetch(`${base}/UserViews`, {
       headers: infuseHeaders,
     });

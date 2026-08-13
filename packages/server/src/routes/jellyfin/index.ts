@@ -251,6 +251,11 @@ export function createJellyfinRouter(
     res.status(200).json(itemQuery(views));
   };
   router.get('/Users/:userId/Views', viewsHandler);
+  router.get('/UserViews/GroupingOptions', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json([]);
+  });
   router.get('/UserViews', viewsHandler);
 
   const capabilitiesHandler = async (req: Request, res: Response) => {
