@@ -200,6 +200,97 @@ describe('Jellyfin player API', () => {
       }),
     ]);
 
+    const virtualFolders = await fetch(`${base}/Library/VirtualFolders`, {
+      headers: infuseHeaders,
+    });
+    expect(virtualFolders.status).toBe(200);
+    const folders = (await virtualFolders.json()) as Array<{
+      Name: string;
+      CollectionType: string;
+      ItemId: string;
+      Locations: string[];
+      LibraryOptions: Record<string, unknown>;
+    }>;
+    expect(folders).toEqual([
+      expect.objectContaining({
+        Name: 'AIOStreams Movie Search',
+        CollectionType: 'movies',
+        ItemId: expect.any(String),
+        Locations: [],
+        LibraryOptions: expect.objectContaining({
+          Enabled: true,
+          PathInfos: [],
+        }),
+      }),
+      expect.objectContaining({
+        Name: 'AIOStreams Series Search',
+        CollectionType: 'tvshows',
+        ItemId: expect.any(String),
+        Locations: [],
+      }),
+    ]);
+
+    const virtualFolderDetails = await fetch(
+      `${base}/Users/user-id/Items/${folders[0]!.ItemId}`,
+      { headers: infuseHeaders }
+    );
+    expect(virtualFolderDetails.status).toBe(200);
+    expect(await virtualFolderDetails.json()).toMatchObject({
+      Id: folders[0]!.ItemId,
+      Type: 'CollectionFolder',
+      CollectionType: 'movies',
+    });
+
+    const endpointInfo = await fetch(`${base}/System/Endpoint`, {
+      headers: infuseHeaders,
+    });
+    expect(endpointInfo.status).toBe(200);
+    expect(await endpointInfo.json()).toMatchObject({
+      IsLocal: true,
+      IsInNetwork: true,
+      Address: `${config.bootstrap.baseUrl}/jellyfin`,
+    });
+
+    const users = await fetch(`${base}/Users`, { headers: infuseHeaders });
+    expect(users.status).toBe(200);
+    expect(await users.json()).toEqual([
+      expect.objectContaining({ Id: expect.any(String), Name: 'user-1' }),
+    ]);
+
+    const statelessResponses: Array<[string, unknown]> = [
+      ['/Sessions', []],
+      [
+        '/Items/Filters',
+        { Genres: [], Tags: [], OfficialRatings: [], Years: [] },
+      ],
+      [
+        '/Items/Filters2',
+        {
+          Genres: [],
+          Tags: [],
+          AudioLanguages: [],
+          SubtitleLanguages: [],
+        },
+      ],
+      ['/Items/Latest', []],
+      ['/Users/user-id/Items/Latest', []],
+      ['/Items/Suggestions', { Items: [], TotalRecordCount: 0, StartIndex: 0 }],
+      [
+        '/Users/user-id/Items/Resume',
+        { Items: [], TotalRecordCount: 0, StartIndex: 0 },
+      ],
+      ['/UserItems/Resume', { Items: [], TotalRecordCount: 0, StartIndex: 0 }],
+      ['/Shows/NextUp', { Items: [], TotalRecordCount: 0, StartIndex: 0 }],
+      ['/Shows/Upcoming', { Items: [], TotalRecordCount: 0, StartIndex: 0 }],
+    ];
+    for (const [path, expected] of statelessResponses) {
+      const response = await fetch(`${base}${path}`, {
+        headers: infuseHeaders,
+      });
+      expect(response.status, path).toBe(200);
+      expect(await response.json(), path).toEqual(expected);
+    }
+
     const search = await fetch(
       `${base}/Items?SearchTerm=The%20Matrix&IncludeItemTypes=Movie&Fields=MediaSources,ProviderIds,Overview`,
       { headers: infuseHeaders }
@@ -285,6 +376,29 @@ describe('Jellyfin player API', () => {
     );
     const item = (await resolved.json()) as { Id: string };
     expect(item.Id).toBe('41494f4a010171000012d687ffffffff');
+
+    const localTrailers = await fetch(
+      `${base}/Items/${item.Id}/LocalTrailers`,
+      { headers: infuseHeaders }
+    );
+    expect(localTrailers.status).toBe(200);
+    expect(await localTrailers.json()).toEqual([]);
+
+    const userData = await fetch(`${base}/UserItems/${item.Id}/UserData`, {
+      headers: infuseHeaders,
+    });
+    expect(userData.status).toBe(200);
+    expect(await userData.json()).toMatchObject({
+      Key: item.Id,
+      IsFavorite: false,
+      Played: false,
+    });
+
+    const updatedPreferences = await fetch(
+      `${base}/DisplayPreferences/home?client=Infuse`,
+      { method: 'POST', headers: infuseHeaders, body: '{}' }
+    );
+    expect(updatedPreferences.status).toBe(204);
 
     const playback = await fetch(`${base}/Items/${item.Id}/PlaybackInfo`, {
       method: 'POST',

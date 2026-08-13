@@ -176,6 +176,16 @@ export function createJellyfinRouter(
     });
   });
 
+  router.get('/System/Endpoint', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json({
+      IsLocal: true,
+      IsInNetwork: true,
+      Address: serverInfo().LocalAddress,
+    });
+  });
+
   router.get('/System/Ping', (_req, res) => res.status(200).send('Jellyfin'));
   router.post('/System/Ping', (_req, res) => res.status(204).end());
   router.get('/QuickConnect/Enabled', (_req, res) =>
@@ -233,6 +243,12 @@ export function createJellyfinRouter(
 
   router.get('/Users/Public', (_req, res) => res.status(200).json([]));
 
+  router.get('/Users', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json([userDto(auth.grant.uuid, auth.grant.uuid)]);
+  });
+
   router.get('/Users/:userId', async (req, res) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
@@ -258,6 +274,27 @@ export function createJellyfinRouter(
   });
   router.get('/UserViews', viewsHandler);
 
+  router.get('/Library/VirtualFolders', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json(
+      virtualViews(auth.grant.uuid).map((view) => ({
+        Name: view.Name,
+        Locations: [],
+        CollectionType: view.CollectionType,
+        ItemId: view.Id,
+        LibraryOptions: {
+          Enabled: true,
+          EnableRealtimeMonitor: false,
+          EnableInternetProviders: false,
+          SeasonZeroDisplayName: 'Specials',
+          TypeOptions: [],
+          PathInfos: [],
+        },
+      }))
+    );
+  });
+
   const capabilitiesHandler = async (req: Request, res: Response) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
@@ -265,6 +302,52 @@ export function createJellyfinRouter(
   };
   router.post('/Sessions/Capabilities', capabilitiesHandler);
   router.post('/Sessions/Capabilities/Full', capabilitiesHandler);
+
+  router.get('/Sessions', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json([]);
+  });
+  router.post('/Sessions/Logout', capabilitiesHandler);
+
+  const emptyItemQueryHandler = async (req: Request, res: Response) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json(paginatedItemQuery(req, []));
+  };
+  const emptyItemArrayHandler = async (req: Request, res: Response) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json([]);
+  };
+
+  router.get('/Items/Filters', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json({
+      Genres: [],
+      Tags: [],
+      OfficialRatings: [],
+      Years: [],
+    });
+  });
+  router.get('/Items/Filters2', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json({
+      Genres: [],
+      Tags: [],
+      AudioLanguages: [],
+      SubtitleLanguages: [],
+    });
+  });
+  router.get('/Items/Latest', emptyItemArrayHandler);
+  router.get('/Users/:userId/Items/Latest', emptyItemArrayHandler);
+  router.get('/Items/Suggestions', emptyItemQueryHandler);
+  router.get('/Users/:userId/Items/Resume', emptyItemQueryHandler);
+  router.get('/UserItems/Resume', emptyItemQueryHandler);
+  router.get('/Shows/NextUp', emptyItemQueryHandler);
+  router.get('/Shows/Upcoming', emptyItemQueryHandler);
 
   // AIOStreams discovery extension: translate an external provider identity to
   // the stable 32-hex item ID subsequently used by official Jellyfin routes.
@@ -438,7 +521,15 @@ export function createJellyfinRouter(
   router.get('/Items/:itemId', async (req, res) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
-    const identity = decodeJellyfinItemId(pathParameter(req, 'itemId') ?? '');
+    const itemId = pathParameter(req, 'itemId') ?? '';
+    const view = virtualViews(auth.grant.uuid).find(
+      (candidate) => candidate.Id === itemId
+    );
+    if (view) {
+      res.status(200).json(view);
+      return;
+    }
+    const identity = decodeJellyfinItemId(itemId);
     if (!identity) {
       problem(res, 404, 'Item not found');
       return;
@@ -454,7 +545,15 @@ export function createJellyfinRouter(
   router.get('/Users/:userId/Items/:itemId', async (req, res) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
-    const identity = decodeJellyfinItemId(pathParameter(req, 'itemId') ?? '');
+    const itemId = pathParameter(req, 'itemId') ?? '';
+    const view = virtualViews(auth.grant.uuid).find(
+      (candidate) => candidate.Id === itemId
+    );
+    if (view) {
+      res.status(200).json(view);
+      return;
+    }
+    const identity = decodeJellyfinItemId(itemId);
     if (!identity) {
       problem(res, 404, 'Item not found');
       return;
@@ -576,6 +675,18 @@ export function createJellyfinRouter(
   router.get('/Items/:itemId/Images/:imageType', imageHandler);
   router.get('/Items/:itemId/Images/:imageType/:imageIndex', imageHandler);
 
+  router.get('/Items/:itemId/LocalTrailers', emptyItemArrayHandler);
+  router.get(
+    '/Users/:userId/Items/:itemId/LocalTrailers',
+    emptyItemArrayHandler
+  );
+  router.get('/Items/:itemId/SpecialFeatures', emptyItemArrayHandler);
+  router.get(
+    '/Users/:userId/Items/:itemId/SpecialFeatures',
+    emptyItemArrayHandler
+  );
+  router.get('/Items/:itemId/Ancestors', emptyItemArrayHandler);
+
   const playbackEventHandler = async (req: Request, res: Response) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
@@ -585,17 +696,52 @@ export function createJellyfinRouter(
   router.post('/Sessions/Playing/Progress', playbackEventHandler);
   router.post('/Sessions/Playing/Stopped', playbackEventHandler);
 
-  router.get('/Users/:userId/Items/:itemId/UserData', async (req, res) => {
+  const userDataHandler = async (req: Request, res: Response) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
+    res.status(200).json(defaultUserData(pathParameter(req, 'itemId')));
+  };
+  router.get('/Users/:userId/Items/:itemId/UserData', userDataHandler);
+  router.get('/UserItems/:itemId/UserData', userDataHandler);
+
+  router.post('/UserItems/:itemId/UserData', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const update =
+      req.body && typeof req.body === 'object'
+        ? (req.body as Record<string, unknown>)
+        : {};
     res.status(200).json({
-      PlaybackPositionTicks: 0,
-      PlayCount: 0,
-      IsFavorite: false,
-      Played: false,
+      ...defaultUserData(pathParameter(req, 'itemId')),
+      ...update,
       Key: pathParameter(req, 'itemId'),
     });
   });
+
+  const favoriteHandler =
+    (isFavorite: boolean) => async (req: Request, res: Response) => {
+      const auth = await authenticated(req, res, dependencies);
+      if (!auth) return;
+      res.status(200).json({
+        ...defaultUserData(pathParameter(req, 'itemId')),
+        IsFavorite: isFavorite,
+      });
+    };
+  router.post('/UserItems/:itemId/Favorite', favoriteHandler(true));
+  router.delete('/UserItems/:itemId/Favorite', favoriteHandler(false));
+
+  const playedHandler =
+    (played: boolean) => async (req: Request, res: Response) => {
+      const auth = await authenticated(req, res, dependencies);
+      if (!auth) return;
+      res.status(200).json({
+        ...defaultUserData(pathParameter(req, 'itemId')),
+        PlayCount: played ? 1 : 0,
+        Played: played,
+      });
+    };
+  router.post('/UserItems/:itemId/Played', playedHandler(true));
+  router.delete('/UserItems/:itemId/Played', playedHandler(false));
 
   router.get('/DisplayPreferences/:displayPreferencesId', async (req, res) => {
     const auth = await authenticated(req, res, dependencies);
@@ -617,6 +763,7 @@ export function createJellyfinRouter(
       Client: requestClient(req),
     });
   });
+  router.post('/DisplayPreferences/:displayPreferencesId', capabilitiesHandler);
 
   return router;
 }
@@ -774,6 +921,16 @@ function requestAccessToken(req: Request): string | undefined {
     ?.match(/\bToken=(?:"([^"]+)"|([^,\s]+))/i)
     ?.slice(1)
     .find(Boolean);
+}
+
+function defaultUserData(itemId: string | undefined) {
+  return {
+    PlaybackPositionTicks: 0,
+    PlayCount: 0,
+    IsFavorite: false,
+    Played: false,
+    Key: itemId,
+  };
 }
 
 function serverInfo() {
