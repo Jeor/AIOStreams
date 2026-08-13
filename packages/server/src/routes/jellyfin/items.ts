@@ -50,7 +50,7 @@ export function identityFromCatalogItem(
 export function jellyfinMetadataItem(
   identity: JellyfinMediaIdentity,
   metadata?: Meta | MetaPreview | null,
-  options?: { seriesName?: string }
+  options?: { seriesName?: string; parentId?: string }
 ) {
   const base = jellyfinItemDto(identity);
   const itemData = metadataForIdentity(identity, metadata);
@@ -83,7 +83,10 @@ export function jellyfinMetadataItem(
     Genres: arrayValue(itemData, 'genres', 'genre'),
     PlayAccess: 'Full',
     MediaType: identity.kind === 'season' ? undefined : 'Video',
-    LocationType: 'Virtual',
+    // Infuse excludes LocationType=Virtual from its standard Jellyfin search
+    // and browse queries. These identities resolve through PlaybackInfo and are
+    // playable server items, so they use Jellyfin's normal library item type.
+    LocationType: 'FileSystem',
     MediaSources: [],
     MediaStreams: [],
     PartCount: 0,
@@ -105,6 +108,7 @@ export function jellyfinMetadataItem(
     ...runtimeFields(itemData),
     ...ratingFields(itemData),
     ...parentIds,
+    ...(options?.parentId ? { ParentId: options.parentId } : {}),
     ...(options?.seriesName ? { SeriesName: options.seriesName } : {}),
   };
 }

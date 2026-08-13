@@ -120,6 +120,26 @@ describe('Jellyfin player API', () => {
             },
           ] as never;
         },
+        browseItems: async (_userData, type) =>
+          type === 'movie'
+            ? ([
+                {
+                  id: 'tt0133093',
+                  type: 'movie',
+                  name: 'The Matrix',
+                  poster: 'https://images.example/matrix.jpg',
+                  releaseInfo: '1999',
+                },
+              ] as never)
+            : ([
+                {
+                  id: 'tt7654321',
+                  type: 'series',
+                  name: 'Example Series',
+                  poster: 'https://images.example/series.jpg',
+                  releaseInfo: '2020',
+                },
+              ] as never),
         getMetadata: async (_userData, identity) =>
           ({
             id: identity.externalId,
@@ -241,6 +261,23 @@ describe('Jellyfin player API', () => {
       CollectionType: 'movies',
     });
 
+    const libraryItems = await fetch(
+      `${base}/Users/user-id/Items?ParentId=${folders[0]!.ItemId}&Recursive=true&ExcludeLocationTypes=Virtual&IncludeItemTypes=Movie`,
+      { headers: infuseHeaders }
+    );
+    expect(libraryItems.status).toBe(200);
+    const libraryResult = (await libraryItems.json()) as {
+      Items: Array<Record<string, unknown>>;
+    };
+    expect(libraryResult.Items).toEqual([
+      expect.objectContaining({
+        Name: 'The Matrix',
+        Type: 'Movie',
+        ParentId: folders[0]!.ItemId,
+        LocationType: 'FileSystem',
+      }),
+    ]);
+
     const endpointInfo = await fetch(`${base}/System/Endpoint`, {
       headers: infuseHeaders,
     });
@@ -292,7 +329,7 @@ describe('Jellyfin player API', () => {
     }
 
     const search = await fetch(
-      `${base}/Items?SearchTerm=The%20Matrix&IncludeItemTypes=Movie&Fields=MediaSources,ProviderIds,Overview`,
+      `${base}/Items?SearchTerm=The%20Matrix&IncludeItemTypes=Movie&ExcludeLocationTypes=Virtual&Fields=MediaSources,ProviderIds,Overview`,
       { headers: infuseHeaders }
     );
     expect(search.status).toBe(200);
@@ -313,6 +350,7 @@ describe('Jellyfin player API', () => {
       Type: 'Movie',
       ProviderIds: { Imdb: 'tt0133093' },
       ProductionYear: 1999,
+      LocationType: 'FileSystem',
     });
     expect(searchResult.Items[0]!.ImageTags.Primary).toBeTruthy();
     expect(searchResult.Items[0]!.UserData).toBeTruthy();

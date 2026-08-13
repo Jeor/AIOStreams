@@ -40,7 +40,6 @@ import {
 import {
   identityFromCatalogItem,
   imageForItem,
-  isVirtualViewId,
   jellyfinMetadataItem,
   seriesEpisodes,
   seriesSeasons,
@@ -62,6 +61,10 @@ export interface JellyfinApiDependencies {
     userData: UserData,
     query: string,
     types: readonly ('movie' | 'series')[]
+  ): Promise<readonly MetaPreview[]>;
+  browseItems(
+    userData: UserData,
+    type: 'movie' | 'series'
   ): Promise<readonly MetaPreview[]>;
   getMetadata(
     userData: UserData,
@@ -105,30 +108,60 @@ const defaultDependencies: JellyfinApiDependencies = {
   async searchItems(userData, query, types) {
     const aiostreams = await new AIOStreams(userData).initialise();
     const catalogs = aiostreams.getCatalogs();
-    const results = await Promise.all(
-      types.map(async (type) => {
-        const catalog = catalogs
-          .filter(
-            (candidate) =>
-              candidate.type.toLowerCase() === type &&
-              candidate.extra?.some(
-                (extra) => extra.name.toLowerCase() === 'search'
-              )
-          )
-          .sort(
-            (a, b) =>
-              Number(/people/i.test(a.id)) - Number(/people/i.test(b.id))
-          )[0];
-        if (!catalog) return [];
-        const response = await aiostreams.getCatalog(
+    const searchable = types.flatMap((type) =>
+      catalogs
+        .filter(
+          (candidate) =>
+            candidate.type.toLowerCase() === type &&
+            candidate.extra?.some(
+              (extra) => extra.name.toLowerCase() === 'search'
+            )
+        )
+        .sort(
+          (a, b) => Number(/people/i.test(a.id)) - Number(/people/i.test(b.id))
+        )
+        .map((catalog) => ({ type, catalog }))
+    );
+    const results = await Promise.allSettled(
+      searchable.map(({ type, catalog }) =>
+        aiostreams.getCatalog(
           type,
           catalog.id,
           new URLSearchParams({ search: query }).toString()
-        );
-        return response.data;
-      })
+        )
+      )
     );
-    return results.flat();
+    const items = results.flatMap((result) =>
+      result.status === 'fulfilled' ? result.value.data : []
+    );
+    logger.debug(
+      {
+        queryLength: query.length,
+        types,
+        catalogs: searchable.length,
+        results: items.length,
+      },
+      'Infuse Jellyfin catalog search complete'
+    );
+    return items;
+  },
+
+  async browseItems(userData, type) {
+    const aiostreams = await new AIOStreams(userData).initialise();
+    const catalog = aiostreams
+      .getCatalogs()
+      .find(
+        (candidate) =>
+          candidate.type.toLowerCase() === type &&
+          !candidate.extra?.some((extra) => extra.isRequired)
+      );
+    if (!catalog) return [];
+    const response = await aiostreams.getCatalog(type, catalog.id);
+    logger.debug(
+      { type, catalog: catalog.id, results: response.data.length },
+      'Infuse Jellyfin library browse complete'
+    );
+    return response.data;
   },
 
   async getMetadata(userData, identity) {
@@ -400,8 +433,35 @@ export function createJellyfinRouter(
 
     const parentId = queryString(req, 'ParentId');
     if (parentId) {
-      if (isVirtualViewId(auth.grant.uuid, parentId)) {
-        res.status(200).json(itemQuery([]));
+      const view = virtualViews(auth.grant.uuid).find(
+        (candidate) => candidate.Id === parentId
+      );
+      if (view) {
+        const type = view.CollectionType === 'tvshows' ? 'series' : 'movie';
+        try {
+          const metas = await dependencies.browseItems(auth.userData, type);
+          const seen = new Set<string>();
+          const items = metas.flatMap((meta) => {
+            const identity = identityFromCatalogItem(meta, type);
+            if (!identity) return [];
+            const id = encodeJellyfinItemId(identity);
+            if (seen.has(id)) return [];
+            seen.add(id);
+            return [
+              jellyfinMetadataItem(identity, meta, { parentId: view.Id }),
+            ];
+          });
+          res.status(200).json(paginatedItemQuery(req, items));
+        } catch (error) {
+          logger.error(
+            {
+              type,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Infuse Jellyfin library browse failed'
+          );
+          problem(res, 502, 'AIOStreams could not browse metadata catalogs');
+        }
         return;
       }
       const parent = decodeJellyfinItemId(parentId);
