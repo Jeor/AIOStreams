@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 
-export type JellyfinIdentityKind = 'movie' | 'series' | 'episode';
+export type JellyfinIdentityKind = 'movie' | 'series' | 'season' | 'episode';
 export type JellyfinIdentityProvider = 'imdb' | 'tmdb' | 'tvdb' | 'mal';
 
 export interface JellyfinMediaIdentity {
@@ -20,6 +20,7 @@ const kindCodes: Record<JellyfinIdentityKind, number> = {
   movie: 1,
   series: 2,
   episode: 3,
+  season: 4,
 };
 
 const providerCodes: Record<JellyfinIdentityProvider, number> = {
@@ -86,6 +87,15 @@ export function decodeJellyfinItemId(
       episode: episodeRaw,
     };
   }
+  if (kind === 'season') {
+    if (
+      seasonRaw === ABSENT_EPISODE_NUMBER ||
+      episodeRaw !== ABSENT_EPISODE_NUMBER
+    ) {
+      return null;
+    }
+    return { kind, provider, externalId, season: seasonRaw };
+  }
   if (
     seasonRaw !== ABSENT_EPISODE_NUMBER ||
     episodeRaw !== ABSENT_EPISODE_NUMBER
@@ -110,6 +120,18 @@ export function identityToStremioRequest(identity: JellyfinMediaIdentity): {
     type: 'series',
     id: `${base}:${normalized.season}:${normalized.episode}`,
   };
+}
+
+export function identityToStremioMetaRequest(identity: JellyfinMediaIdentity): {
+  type: 'movie' | 'series';
+  id: string;
+} {
+  const normalized = normalizeIdentity(identity);
+  const id =
+    normalized.provider === 'imdb'
+      ? normalized.externalId
+      : `${normalized.provider}:${normalized.externalId}`;
+  return { type: normalized.kind === 'movie' ? 'movie' : 'series', id };
 }
 
 export function parseExternalIdentity(input: {
@@ -154,8 +176,10 @@ export function jellyfinItemDto(identity: JellyfinMediaIdentity) {
         ? 'Movie'
         : normalized.kind === 'series'
           ? 'Series'
-          : 'Episode',
-    IsFolder: normalized.kind === 'series',
+          : normalized.kind === 'season'
+            ? 'Season'
+            : 'Episode',
+    IsFolder: normalized.kind === 'series' || normalized.kind === 'season',
     LocationType: 'Virtual',
     ProviderIds: { [providerName]: normalized.externalId },
     ...(normalized.kind === 'episode'
@@ -163,18 +187,22 @@ export function jellyfinItemDto(identity: JellyfinMediaIdentity) {
           ParentIndexNumber: normalized.season,
           IndexNumber: normalized.episode,
         }
-      : {}),
+      : normalized.kind === 'season'
+        ? { IndexNumber: normalized.season }
+        : {}),
   };
 }
 
 function decodePlayerAlias(value: string): JellyfinMediaIdentity | null {
   const parts = value.split(':');
-  if (parts.length !== 3 && parts.length !== 5) return null;
+  if (parts.length !== 3 && parts.length !== 4 && parts.length !== 5)
+    return null;
   return parseExternalIdentity({
     kind: parts[0] ?? '',
     provider: parts[1] ?? '',
     externalId: parts[2] ?? '',
-    ...(parts.length === 5 ? { season: parts[3], episode: parts[4] } : {}),
+    ...(parts.length >= 4 ? { season: parts[3] } : {}),
+    ...(parts.length === 5 ? { episode: parts[4] } : {}),
   });
 }
 
@@ -199,6 +227,13 @@ function normalizeIdentity(
     ) {
       throw new Error('Episode identity is invalid');
     }
+  } else if (identity.kind === 'season') {
+    if (
+      !validEpisodeNumber(identity.season) ||
+      identity.episode !== undefined
+    ) {
+      throw new Error('Season identity is invalid');
+    }
   } else if (identity.season !== undefined || identity.episode !== undefined) {
     throw new Error('Media identity is invalid');
   }
@@ -208,7 +243,9 @@ function normalizeIdentity(
     externalId: identity.provider === 'imdb' ? `tt${digits}` : digits,
     ...(identity.kind === 'episode'
       ? { season: identity.season, episode: identity.episode }
-      : {}),
+      : identity.kind === 'season'
+        ? { season: identity.season }
+        : {}),
   };
 }
 
@@ -261,7 +298,12 @@ function validEpisodeNumber(value: number | undefined): value is number {
 }
 
 function isKind(value: string): value is JellyfinIdentityKind {
-  return value === 'movie' || value === 'series' || value === 'episode';
+  return (
+    value === 'movie' ||
+    value === 'series' ||
+    value === 'season' ||
+    value === 'episode'
+  );
 }
 
 function isProvider(value: string): value is JellyfinIdentityProvider {

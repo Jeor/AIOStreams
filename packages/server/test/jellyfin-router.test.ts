@@ -95,6 +95,54 @@ describe('Jellyfin player API', () => {
               addon: { name: 'Headers' },
             },
           ] as never,
+        searchItems: async (_userData, query, types) => {
+          if (types.includes('series')) {
+            return [
+              {
+                id: 'tt7654321',
+                type: 'series',
+                name: 'Example Series',
+                poster: 'https://images.example/series.jpg',
+                releaseInfo: '2020',
+              },
+            ] as never;
+          }
+          expect(query).toBe('The Matrix');
+          return [
+            {
+              id: 'tt0133093',
+              type: 'movie',
+              name: 'The Matrix',
+              poster: 'https://images.example/matrix.jpg',
+              releaseInfo: '1999',
+              imdbRating: 8.7,
+              description: 'A simulated reality.',
+            },
+          ] as never;
+        },
+        getMetadata: async (_userData, identity) =>
+          ({
+            id: identity.externalId,
+            type: identity.kind === 'movie' ? 'movie' : 'series',
+            name: identity.kind === 'movie' ? 'The Matrix' : 'Example Series',
+            poster: 'https://images.example/poster.jpg',
+            background: 'https://images.example/backdrop.jpg',
+            description: 'Full metadata.',
+            releaseInfo: '1999',
+            videos:
+              identity.kind === 'movie'
+                ? undefined
+                : [
+                    {
+                      id: 'tt7654321:1:1',
+                      title: 'Pilot',
+                      season: 1,
+                      episode: 1,
+                      released: '2020-01-01',
+                      thumbnail: 'https://images.example/episode.jpg',
+                    },
+                  ],
+          }) as never,
         nowSeconds: () => 100,
       })
     );
@@ -115,6 +163,110 @@ describe('Jellyfin player API', () => {
     expect(login.status).toBe(200);
     const accessToken = ((await login.json()) as { AccessToken: string })
       .AccessToken;
+    const infuseHeaders = {
+      'X-Emby-Authorization': `MediaBrowser Token="${accessToken}", Client="Infuse-Direct", Version="8.5"`,
+    };
+
+    const systemInfo = await fetch(`${base}/System/Info`, {
+      headers: infuseHeaders,
+    });
+    expect(systemInfo.status).toBe(200);
+
+    const views = await fetch(`${base}/UserViews`, {
+      headers: infuseHeaders,
+    });
+    const viewsResult = (await views.json()) as {
+      Items: Array<{ Type: string; CollectionType: string }>;
+    };
+    expect(viewsResult.Items).toEqual([
+      expect.objectContaining({
+        Type: 'CollectionFolder',
+        CollectionType: 'movies',
+      }),
+      expect.objectContaining({
+        Type: 'CollectionFolder',
+        CollectionType: 'tvshows',
+      }),
+    ]);
+
+    const search = await fetch(
+      `${base}/Items?SearchTerm=The%20Matrix&IncludeItemTypes=Movie&Fields=MediaSources,ProviderIds,Overview`,
+      { headers: infuseHeaders }
+    );
+    expect(search.status).toBe(200);
+    const searchResult = (await search.json()) as {
+      Items: Array<{
+        Id: string;
+        Name: string;
+        Type: string;
+        ProviderIds: Record<string, string>;
+        ImageTags: Record<string, string>;
+        UserData: Record<string, unknown>;
+        ProductionYear: number;
+      }>;
+    };
+    expect(searchResult.Items).toHaveLength(1);
+    expect(searchResult.Items[0]).toMatchObject({
+      Name: 'The Matrix',
+      Type: 'Movie',
+      ProviderIds: { Imdb: 'tt0133093' },
+      ProductionYear: 1999,
+    });
+    expect(searchResult.Items[0]!.ImageTags.Primary).toBeTruthy();
+    expect(searchResult.Items[0]!.UserData).toBeTruthy();
+
+    const searchedItem = searchResult.Items[0]!;
+    const details = await fetch(`${base}/Items/${searchedItem.Id}`, {
+      headers: infuseHeaders,
+    });
+    expect(details.status).toBe(200);
+    expect(await details.json()).toMatchObject({
+      Id: searchedItem.Id,
+      Name: 'The Matrix',
+      Overview: 'Full metadata.',
+    });
+
+    const artwork = await fetch(
+      `${base}/Items/${searchedItem.Id}/Images/Primary`,
+      { headers: infuseHeaders, redirect: 'manual' }
+    );
+    expect(artwork.status).toBe(302);
+    expect(artwork.headers.get('location')).toBe(
+      'https://images.example/poster.jpg'
+    );
+
+    const seriesSearch = await fetch(
+      `${base}/Users/user-id/Items?SearchTerm=Example&IncludeItemTypes=Series`,
+      { headers: infuseHeaders }
+    );
+    const series = (
+      (await seriesSearch.json()) as {
+        Items: Array<{ Id: string; Type: string }>;
+      }
+    ).Items[0]!;
+    expect(series.Type).toBe('Series');
+
+    const seasons = await fetch(`${base}/Shows/${series.Id}/Seasons`, {
+      headers: infuseHeaders,
+    });
+    expect(seasons.status).toBe(200);
+    const seasonItems = (
+      (await seasons.json()) as { Items: Array<{ Id: string; Type: string }> }
+    ).Items;
+    expect(seasonItems).toHaveLength(1);
+    expect(seasonItems[0]!.Type).toBe('Season');
+
+    const episodes = await fetch(
+      `${base}/Shows/${series.Id}/Episodes?Season=1`,
+      { headers: infuseHeaders }
+    );
+    const episodeItems = (
+      (await episodes.json()) as {
+        Items: Array<{ Id: string; Type: string; Name: string }>;
+      }
+    ).Items;
+    expect(episodeItems).toHaveLength(1);
+    expect(episodeItems[0]).toMatchObject({ Type: 'Episode', Name: 'Pilot' });
 
     const resolved = await fetch(
       `${base}/Items/Resolve?Kind=Movie&Provider=Imdb&Id=tt1234567`,

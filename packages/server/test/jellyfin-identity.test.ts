@@ -53,6 +53,18 @@ describe('Jellyfin item identity translation', () => {
     });
   });
 
+  it('round-trips a season identity', () => {
+    const identity = {
+      kind: 'season' as const,
+      provider: 'imdb' as const,
+      externalId: 'tt7654321',
+      season: 2,
+    };
+    expect(decodeJellyfinItemId(encodeJellyfinItemId(identity))).toEqual(
+      identity
+    );
+  });
+
   it('accepts the player alias while rejecting incomplete episodes', () => {
     expect(decodeJellyfinItemId('movie:imdb:tt1234567')).toEqual({
       kind: 'movie',

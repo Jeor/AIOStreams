@@ -1,6 +1,8 @@
 import { Router, type Request, type Response } from 'express';
 import {
   AIOStreams,
+  type Meta,
+  type MetaPreview,
   type ParsedStream,
   type UserData,
   UserRepository,
@@ -17,6 +19,7 @@ import { streamApiRateLimiter } from '../../middlewares/ratelimit.js';
 import {
   decodeJellyfinItemId,
   encodeJellyfinItemId,
+  identityToStremioMetaRequest,
   identityToStremioRequest,
   jellyfinItemDto,
   parseExternalIdentity,
@@ -34,6 +37,15 @@ import {
   safeExternalHttpUrl,
   sourceContainer,
 } from './sources.js';
+import {
+  identityFromCatalogItem,
+  imageForItem,
+  isVirtualViewId,
+  jellyfinMetadataItem,
+  seriesEpisodes,
+  seriesSeasons,
+  virtualViews,
+} from './items.js';
 
 const logger = createLogger('jellyfin-api');
 const SOURCE_TOKEN_TTL_SECONDS = 5 * 60;
@@ -45,6 +57,15 @@ export interface JellyfinApiDependencies {
     userData: UserData,
     request: { type: 'movie' | 'series'; id: string }
   ): Promise<readonly ParsedStream[]>;
+  searchItems(
+    userData: UserData,
+    query: string,
+    types: readonly ('movie' | 'series')[]
+  ): Promise<readonly MetaPreview[]>;
+  getMetadata(
+    userData: UserData,
+    identity: JellyfinMediaIdentity
+  ): Promise<Meta | null>;
   nowSeconds(): number;
 }
 
@@ -80,6 +101,42 @@ const defaultDependencies: JellyfinApiDependencies = {
     return response.data.streams;
   },
 
+  async searchItems(userData, query, types) {
+    const aiostreams = await new AIOStreams(userData).initialise();
+    const catalogs = aiostreams.getCatalogs();
+    const results = await Promise.all(
+      types.map(async (type) => {
+        const catalog = catalogs
+          .filter(
+            (candidate) =>
+              candidate.type.toLowerCase() === type &&
+              candidate.extra?.some(
+                (extra) => extra.name.toLowerCase() === 'search'
+              )
+          )
+          .sort(
+            (a, b) =>
+              Number(/people/i.test(a.id)) - Number(/people/i.test(b.id))
+          )[0];
+        if (!catalog) return [];
+        const response = await aiostreams.getCatalog(
+          type,
+          catalog.id,
+          new URLSearchParams({ search: query }).toString()
+        );
+        return response.data;
+      })
+    );
+    return results.flat();
+  },
+
+  async getMetadata(userData, identity) {
+    const aiostreams = await new AIOStreams(userData).initialise();
+    const request = identityToStremioMetaRequest(identity);
+    const response = await aiostreams.getMeta(request.type, request.id);
+    return response.data;
+  },
+
   nowSeconds: () => Math.floor(Date.now() / 1000),
 };
 
@@ -100,6 +157,36 @@ export function createJellyfinRouter(
   router.get('/System/Info/Public', (_req, res) => {
     res.status(200).json(serverInfo());
   });
+
+  router.get('/System/Info', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json({
+      ...serverInfo(),
+      WanAddress: serverInfo().LocalAddress,
+      WebSocketPortNumber: null,
+      CompletedInstallations: [],
+      CanSelfRestart: false,
+      CanLaunchWebBrowser: false,
+      HasPendingRestart: false,
+      SupportsLibraryMonitor: false,
+      EncoderLocation: 'NotFound',
+      SystemArchitecture: process.arch,
+    });
+  });
+
+  router.get('/System/Ping', (_req, res) => res.status(200).send('Jellyfin'));
+  router.post('/System/Ping', (_req, res) => res.status(204).end());
+  router.get('/QuickConnect/Enabled', (_req, res) =>
+    res.status(200).json(false)
+  );
+  router.get('/Branding/Configuration', (_req, res) =>
+    res.status(200).json({
+      LoginDisclaimer: '',
+      CustomCssCode: '',
+      SplashscreenEnabled: false,
+    })
+  );
 
   router.post('/Users/AuthenticateByName', async (req, res) => {
     try {
@@ -143,6 +230,36 @@ export function createJellyfinRouter(
     res.status(200).json(userDto(auth.grant.uuid, auth.grant.uuid));
   });
 
+  router.get('/Users/Public', (_req, res) => res.status(200).json([]));
+
+  router.get('/Users/:userId', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const user = userDto(auth.grant.uuid, auth.grant.uuid);
+    if (pathParameter(req, 'userId') !== user.Id) {
+      problem(res, 404, 'User not found');
+      return;
+    }
+    res.status(200).json(user);
+  });
+
+  const viewsHandler = async (req: Request, res: Response) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const views = virtualViews(auth.grant.uuid);
+    res.status(200).json(itemQuery(views));
+  };
+  router.get('/Users/:userId/Views', viewsHandler);
+  router.get('/UserViews', viewsHandler);
+
+  const capabilitiesHandler = async (req: Request, res: Response) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(204).end();
+  };
+  router.post('/Sessions/Capabilities', capabilitiesHandler);
+  router.post('/Sessions/Capabilities/Full', capabilitiesHandler);
+
   // AIOStreams discovery extension: translate an external provider identity to
   // the stable 32-hex item ID subsequently used by official Jellyfin routes.
   router.get('/Items/Resolve', async (req, res) => {
@@ -156,33 +273,198 @@ export function createJellyfinRouter(
     res.status(200).json(jellyfinItemDto(identity));
   });
 
-  router.get('/Items', async (req, res) => {
+  const itemsHandler = async (req: Request, res: Response) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
+
+    const searchTerm = queryString(req, 'SearchTerm')?.trim();
+    if (searchTerm) {
+      try {
+        const requestedTypes = searchTypes(req);
+        const metas = await dependencies.searchItems(
+          auth.userData,
+          searchTerm,
+          requestedTypes
+        );
+        const seen = new Set<string>();
+        const items = metas.flatMap((meta) => {
+          const type = meta.type.toLowerCase();
+          const kind = type === 'series' ? 'series' : 'movie';
+          if (!requestedTypes.includes(kind)) return [];
+          const identity = identityFromCatalogItem(meta, kind);
+          if (!identity) return [];
+          const id = encodeJellyfinItemId(identity);
+          if (seen.has(id)) return [];
+          seen.add(id);
+          return [jellyfinMetadataItem(identity, meta)];
+        });
+        res.status(200).json(paginatedItemQuery(req, items));
+      } catch (error) {
+        logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Infuse Jellyfin search failed'
+        );
+        problem(res, 502, 'AIOStreams could not search metadata catalogs');
+      }
+      return;
+    }
+
+    const parentId = queryString(req, 'ParentId');
+    if (parentId) {
+      if (isVirtualViewId(auth.grant.uuid, parentId)) {
+        res.status(200).json(itemQuery([]));
+        return;
+      }
+      const parent = decodeJellyfinItemId(parentId);
+      if (parent?.kind === 'series' || parent?.kind === 'season') {
+        try {
+          const seriesIdentity: JellyfinMediaIdentity = {
+            ...parent,
+            kind: 'series',
+            season: undefined,
+            episode: undefined,
+          };
+          const metadata = await dependencies.getMetadata(
+            auth.userData,
+            seriesIdentity
+          );
+          const items =
+            parent.kind === 'series'
+              ? seriesSeasons(seriesIdentity, metadata)
+              : seriesEpisodes(seriesIdentity, metadata, parent.season);
+          res.status(200).json(paginatedItemQuery(req, items));
+        } catch {
+          problem(res, 502, 'AIOStreams could not load series metadata');
+        }
+        return;
+      }
+    }
+
     const identity = identityFromItemsQuery(req);
-    const items = identity ? [jellyfinItemDto(identity)] : [];
-    res.status(200).json({
-      Items: items,
-      TotalRecordCount: items.length,
-      StartIndex: 0,
-    });
+    const items = identity ? [jellyfinMetadataItem(identity)] : [];
+    res.status(200).json(itemQuery(items));
+  };
+  router.get('/Items', itemsHandler);
+  router.get('/Users/:userId/Items', itemsHandler);
+
+  router.get('/Search/Hints', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const searchTerm = queryString(req, 'SearchTerm')?.trim();
+    if (!searchTerm) {
+      res.status(200).json({ SearchHints: [], TotalRecordCount: 0 });
+      return;
+    }
+    try {
+      const requestedTypes = searchTypes(req);
+      const metas = await dependencies.searchItems(
+        auth.userData,
+        searchTerm,
+        requestedTypes
+      );
+      const hints = metas.flatMap((meta) => {
+        const kind = meta.type.toLowerCase() === 'series' ? 'series' : 'movie';
+        if (!requestedTypes.includes(kind)) return [];
+        const identity = identityFromCatalogItem(meta, kind);
+        if (!identity) return [];
+        const item = jellyfinMetadataItem(identity, meta);
+        return [
+          {
+            ItemId: item.Id,
+            Id: item.Id,
+            Name: item.Name,
+            Type: item.Type,
+            MediaType: item.MediaType,
+            PrimaryImageTag: item.ImageTags.Primary,
+            ProductionYear: item.ProductionYear,
+          },
+        ];
+      });
+      const page = paginated(req, hints);
+      res.status(200).json({
+        SearchHints: page.items,
+        TotalRecordCount: hints.length,
+      });
+    } catch {
+      problem(res, 502, 'AIOStreams could not search metadata catalogs');
+    }
+  });
+
+  router.get('/Shows/:seriesId/Seasons', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const identity = decodeJellyfinItemId(pathParameter(req, 'seriesId') ?? '');
+    if (identity?.kind !== 'series') {
+      problem(res, 404, 'Series not found');
+      return;
+    }
+    try {
+      const metadata = await dependencies.getMetadata(auth.userData, identity);
+      res
+        .status(200)
+        .json(paginatedItemQuery(req, seriesSeasons(identity, metadata)));
+    } catch {
+      problem(res, 502, 'AIOStreams could not load series metadata');
+    }
+  });
+
+  router.get('/Shows/:seriesId/Episodes', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const identity = decodeJellyfinItemId(pathParameter(req, 'seriesId') ?? '');
+    if (identity?.kind !== 'series') {
+      problem(res, 404, 'Series not found');
+      return;
+    }
+    const season = nonNegativeInteger(queryString(req, 'Season'));
+    try {
+      const metadata = await dependencies.getMetadata(auth.userData, identity);
+      res
+        .status(200)
+        .json(
+          paginatedItemQuery(req, seriesEpisodes(identity, metadata, season))
+        );
+    } catch {
+      problem(res, 502, 'AIOStreams could not load series metadata');
+    }
   });
 
   router.get('/Items/:itemId', async (req, res) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
-    const identity = decodeJellyfinItemId(req.params.itemId);
+    const identity = decodeJellyfinItemId(pathParameter(req, 'itemId') ?? '');
     if (!identity) {
       problem(res, 404, 'Item not found');
       return;
     }
-    res.status(200).json(jellyfinItemDto(identity));
+    try {
+      const metadata = await dependencies.getMetadata(auth.userData, identity);
+      res.status(200).json(jellyfinMetadataItem(identity, metadata));
+    } catch {
+      problem(res, 502, 'AIOStreams could not load item metadata');
+    }
   });
 
-  router.post('/Items/:itemId/PlaybackInfo', async (req, res) => {
+  router.get('/Users/:userId/Items/:itemId', async (req, res) => {
     const auth = await authenticated(req, res, dependencies);
     if (!auth) return;
-    const identity = decodeJellyfinItemId(req.params.itemId);
+    const identity = decodeJellyfinItemId(pathParameter(req, 'itemId') ?? '');
+    if (!identity) {
+      problem(res, 404, 'Item not found');
+      return;
+    }
+    try {
+      const metadata = await dependencies.getMetadata(auth.userData, identity);
+      res.status(200).json(jellyfinMetadataItem(identity, metadata));
+    } catch {
+      problem(res, 502, 'AIOStreams could not load item metadata');
+    }
+  });
+
+  const playbackInfoHandler = async (req: Request, res: Response) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const identity = decodeJellyfinItemId(pathParameter(req, 'itemId') ?? '');
     const stremioRequest = identity && identityToStremioRequest(identity);
     if (!identity || !stremioRequest) {
       problem(res, 404, 'Playable item not found');
@@ -224,7 +506,9 @@ export function createJellyfinRouter(
       );
       problem(res, 502, 'AIOStreams could not resolve playback sources');
     }
-  });
+  };
+  router.get('/Items/:itemId/PlaybackInfo', playbackInfoHandler);
+  router.post('/Items/:itemId/PlaybackInfo', playbackInfoHandler);
 
   const redirectHandler = (req: Request, res: Response) => {
     const requestedItemId = pathParameter(req, 'itemId');
@@ -257,6 +541,76 @@ export function createJellyfinRouter(
   };
   router.get('/Videos/:itemId/stream', redirectHandler);
   router.get('/Videos/:itemId/stream.:container', redirectHandler);
+
+  const imageHandler = async (req: Request, res: Response) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    const identity = decodeJellyfinItemId(pathParameter(req, 'itemId') ?? '');
+    if (!identity) {
+      problem(res, 404, 'Item not found');
+      return;
+    }
+    try {
+      const metadata = await dependencies.getMetadata(auth.userData, identity);
+      const imageUrl = imageForItem(
+        identity,
+        metadata,
+        pathParameter(req, 'imageType') ?? 'Primary'
+      );
+      if (!imageUrl || !httpUrl(imageUrl)) {
+        problem(res, 404, 'Image not found');
+        return;
+      }
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      res.redirect(302, imageUrl);
+    } catch {
+      problem(res, 502, 'AIOStreams could not load item artwork');
+    }
+  };
+  router.get('/Items/:itemId/Images/:imageType', imageHandler);
+  router.get('/Items/:itemId/Images/:imageType/:imageIndex', imageHandler);
+
+  const playbackEventHandler = async (req: Request, res: Response) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(204).end();
+  };
+  router.post('/Sessions/Playing', playbackEventHandler);
+  router.post('/Sessions/Playing/Progress', playbackEventHandler);
+  router.post('/Sessions/Playing/Stopped', playbackEventHandler);
+
+  router.get('/Users/:userId/Items/:itemId/UserData', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json({
+      PlaybackPositionTicks: 0,
+      PlayCount: 0,
+      IsFavorite: false,
+      Played: false,
+      Key: pathParameter(req, 'itemId'),
+    });
+  });
+
+  router.get('/DisplayPreferences/:displayPreferencesId', async (req, res) => {
+    const auth = await authenticated(req, res, dependencies);
+    if (!auth) return;
+    res.status(200).json({
+      Id: pathParameter(req, 'displayPreferencesId'),
+      ViewType: 'Poster',
+      SortBy: 'SortName',
+      IndexBy: 'None',
+      RememberIndexing: false,
+      PrimaryImageHeight: 250,
+      PrimaryImageWidth: 250,
+      CustomPrefs: {},
+      ScrollDirection: 'Horizontal',
+      ShowBackdrop: true,
+      RememberSorting: false,
+      SortOrder: 'Ascending',
+      ShowSidebar: false,
+      Client: requestClient(req),
+    });
+  });
 
   return router;
 }
@@ -355,8 +709,57 @@ function identityFromItemsQuery(req: Request): JellyfinMediaIdentity | null {
   });
 }
 
+function searchTypes(req: Request): Array<'movie' | 'series'> {
+  const values = [
+    ...queryStrings(req, 'IncludeItemTypes'),
+    ...queryStrings(req, 'IncludeItemTypes[]'),
+  ];
+  const include = (values.length > 0 ? values : ['Movie,Series'])
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim().toLowerCase());
+  const types: Array<'movie' | 'series'> = [];
+  if (include.includes('movie')) types.push('movie');
+  if (include.includes('series')) types.push('series');
+  return types.length > 0 ? types : ['movie', 'series'];
+}
+
+function itemQuery(items: unknown[], startIndex: number = 0) {
+  return {
+    Items: items,
+    TotalRecordCount: items.length,
+    StartIndex: startIndex,
+  };
+}
+
+function paginatedItemQuery(req: Request, items: unknown[]) {
+  const page = paginated(req, items);
+  return {
+    Items: page.items,
+    TotalRecordCount: items.length,
+    StartIndex: page.start,
+  };
+}
+
+function paginated<T>(req: Request, items: T[]) {
+  const start = nonNegativeInteger(queryString(req, 'StartIndex')) ?? 0;
+  const limit = nonNegativeInteger(queryString(req, 'Limit'));
+  return {
+    start,
+    items: items.slice(start, limit === undefined ? undefined : start + limit),
+  };
+}
+
+function nonNegativeInteger(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
 function requestAccessToken(req: Request): string | undefined {
-  const direct = req.get('X-Emby-Token') ?? req.get('X-MediaBrowser-Token');
+  const direct =
+    req.get('X-Emby-Token') ??
+    req.get('X-MediaBrowser-Token') ??
+    req.get('X-Emby-Authorization')?.match(/\bToken="([^"]+)"/i)?.[1];
   if (direct) return direct;
   const query = queryString(req, 'api_key');
   if (query) return query;
@@ -387,7 +790,68 @@ function userDto(uuid: string, name: string) {
     HasPassword: true,
     HasConfiguredPassword: true,
     EnableAutoLogin: false,
-    Policy: { IsAdministrator: false, IsDisabled: false },
+    Configuration: {
+      PlayDefaultAudioTrack: true,
+      SubtitleLanguagePreference: '',
+      DisplayMissingEpisodes: false,
+      GroupedFolders: [],
+      SubtitleMode: 'Default',
+      DisplayCollectionsView: false,
+      EnableLocalPassword: false,
+      OrderedViews: [],
+      LatestItemsExcludes: [],
+      MyMediaExcludes: [],
+      HidePlayedInLatest: true,
+      RememberAudioSelections: true,
+      RememberSubtitleSelections: true,
+      EnableNextEpisodeAutoPlay: true,
+    },
+    Policy: {
+      IsAdministrator: false,
+      IsHidden: false,
+      IsDisabled: false,
+      EnableCollectionManagement: false,
+      EnableSubtitleManagement: false,
+      EnableLyricManagement: false,
+      IsTagBlockingModeInclusive: false,
+      BlockedTags: [],
+      AllowedTags: [],
+      EnableUserPreferenceAccess: true,
+      AccessSchedules: [],
+      BlockUnratedItems: [],
+      EnableRemoteControlOfOtherUsers: false,
+      EnableSharedDeviceControl: false,
+      EnableRemoteAccess: true,
+      EnableLiveTvManagement: false,
+      EnableLiveTvAccess: false,
+      EnableMediaPlayback: true,
+      EnableAudioPlaybackTranscoding: false,
+      EnableVideoPlaybackTranscoding: false,
+      EnablePlaybackRemuxing: false,
+      ForceRemoteSourceTranscoding: false,
+      EnableContentDeletion: false,
+      EnableContentDownloading: false,
+      EnableSyncTranscoding: false,
+      EnableMediaConversion: false,
+      EnabledDevices: [],
+      EnableAllDevices: true,
+      EnabledChannels: [],
+      EnableAllChannels: true,
+      EnabledFolders: [],
+      EnableAllFolders: true,
+      InvalidLoginAttemptCount: 0,
+      LoginAttemptsBeforeLockout: -1,
+      MaxActiveSessions: 0,
+      EnablePublicSharing: false,
+      BlockedMediaFolders: [],
+      BlockedChannels: [],
+      RemoteClientBitrateLimit: 0,
+      AuthenticationProviderId:
+        'Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider',
+      PasswordResetProviderId:
+        'Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider',
+      SyncPlayAccess: 'None',
+    },
   };
 }
 
@@ -417,12 +881,26 @@ function bodyString(req: Request, key: string): string | undefined {
 }
 
 function queryString(req: Request, key: string): string | undefined {
-  const direct = req.query[key];
-  if (typeof direct === 'string') return direct;
+  return queryStrings(req, key)[0];
+}
+
+function queryStrings(req: Request, key: string): string[] {
   const found = Object.entries(req.query).find(
     ([candidate]) => candidate.toLowerCase() === key.toLowerCase()
   )?.[1];
-  return typeof found === 'string' ? found : undefined;
+  if (typeof found === 'string') return [found];
+  if (Array.isArray(found))
+    return found.filter((value): value is string => typeof value === 'string');
+  return [];
+}
+
+function httpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 function pathParameter(req: Request, key: string): string | undefined {

@@ -3,10 +3,12 @@ title: Jellyfin player API
 description: Use AIOStreams as a playback-only Jellyfin-compatible server for direct provider streams.
 ---
 
-The optional Jellyfin player API lets a media player authenticate against an
-existing AIOStreams configuration and request AIOStreams' ordered stream
+The optional Jellyfin player API lets Infuse Direct Mode and other compatible
+players authenticate against an existing AIOStreams configuration, search the
+user's search-capable metadata catalogs, and request AIOStreams' ordered stream
 results using Jellyfin `PlaybackInfo` calls. It runs inside the normal
-AIOStreams server; no bridge, sidecar, or media proxy is required.
+AIOStreams server; no bridge, sidecar, catalog import, or media proxy is
+required.
 
 Enable **Settings → API → Enable Jellyfin player API**, or set:
 
@@ -25,19 +27,53 @@ that configuration's plain password as the password.
 
 ## Scope
 
-This is a playback-only compatibility surface, not a replacement Jellyfin
-library server. It implements:
+This is an on-demand search and playback compatibility surface, not a
+replacement Jellyfin library server. It exposes two empty virtual views so
+players recognise movie and series search sources, but it never imports or
+pre-populates a media library.
+
+For title search to return results, the user's AIOStreams configuration must
+include a search-capable movie/series catalog such as the TMDB addon. The same
+configuration must include at least one addon that returns playable streams.
+
+The main compatibility endpoints include:
 
 ```text
 GET  /System/Info/Public
+GET  /System/Info
 POST /Users/AuthenticateByName
 GET  /Users/Me
+GET  /Users/{userId}/Views
+GET  /UserViews
 GET  /Items
+GET  /Users/{userId}/Items
+GET  /Search/Hints
 GET  /Items/Resolve
 GET  /Items/{itemId}
+GET  /Shows/{seriesId}/Seasons
+GET  /Shows/{seriesId}/Episodes
+GET  /Items/{itemId}/Images/{imageType}
+GET  /Items/{itemId}/PlaybackInfo
 POST /Items/{itemId}/PlaybackInfo
 GET  /Videos/{itemId}/stream[.{container}]
 ```
+
+## Infuse Direct Mode
+
+Add a Jellyfin media server in Infuse using the AIOStreams `/jellyfin` URL and
+the AIOStreams configuration UUID (or alias) and plain configuration password.
+Leave **Library Mode** disabled. Infuse sends searches to AIOStreams on demand;
+the virtual views intentionally contain no browsable catalog entries.
+
+```text
+https://your-aiostreams.example/jellyfin
+```
+
+When Infuse sends `Items?SearchTerm=...`, AIOStreams locates the first
+search-capable movie and/or series catalog in that user's configuration. Search
+results are converted to Jellyfin item DTOs. Opening an item retrieves its
+metadata, and opening an episode or movie invokes the user's normal AIOStreams
+stream pipeline.
 
 `PlaybackInfo` uses the normal AIOStreams fetch, filtering, deduplication,
 sorting, Stream Expression Language, and result-limit pipeline. The dedicated
