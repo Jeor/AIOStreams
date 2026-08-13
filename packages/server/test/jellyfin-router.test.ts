@@ -155,6 +155,10 @@ describe('Jellyfin player API', () => {
       throw new Error('No test address');
     const base = `http://127.0.0.1:${address.port}/jellyfin`;
 
+    const publicSystemInfo = await fetch(`${base}/System/Info/Public`);
+    expect(publicSystemInfo.status).toBe(200);
+    expect(await publicSystemInfo.json()).toMatchObject({ Version: '10.10.7' });
+
     const login = await fetch(`${base}/Users/AuthenticateByName`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -171,6 +175,7 @@ describe('Jellyfin player API', () => {
       headers: infuseHeaders,
     });
     expect(systemInfo.status).toBe(200);
+    expect(await systemInfo.json()).toMatchObject({ Version: '10.10.7' });
 
     const views = await fetch(`${base}/UserViews`, {
       headers: infuseHeaders,

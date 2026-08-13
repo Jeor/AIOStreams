@@ -49,6 +49,7 @@ import {
 
 const logger = createLogger('jellyfin-api');
 const SOURCE_TOKEN_TTL_SECONDS = 5 * 60;
+const JELLYFIN_COMPATIBILITY_VERSION = '10.10.7';
 
 export interface JellyfinApiDependencies {
   authenticate(username: string, password: string): Promise<{ uuid: string }>;
@@ -774,7 +775,7 @@ function serverInfo() {
   return {
     LocalAddress: `${appConfig.bootstrap.baseUrl.replace(/\/+$/, '')}/jellyfin`,
     ServerName: `${appConfig.branding.addonName} Jellyfin`,
-    Version: appConfig.bootstrap.version,
+    Version: JELLYFIN_COMPATIBILITY_VERSION,
     ProductName: 'AIOStreams Jellyfin Player API',
     OperatingSystem: process.platform,
     Id: serverId(),
